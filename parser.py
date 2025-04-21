@@ -5,7 +5,9 @@ import json
 import re
 import argparse
 import csv
- 
+import os
+import PyPDF2  # For extracting text from PDF
+
 def clean_column_name(col_name):
     """Remove BOM and clean up column names."""
     # Remove BOM if present
@@ -43,11 +45,234 @@ def extract_tables(pdf_path, csv_output_path):
      except Exception as e:
          print(f"Error extracting tables from PDF: {e}")
          raise  # Re-raise the exception to see the full traceback
- 
 
-def convert_scoresheet(pdf_path: str, formats: list[str]) -> dict[str, str]:
+def extract_metadata(pdf_path, txt_output_path):
+    """
+    Extract metadata from a PDF using PyPDF2 and save to a text file in YAML format.
+    
+    Args:
+        pdf_path (str): Path to the input PDF file.
+        txt_output_path (str): Path to save the metadata text file.
+        
+    Returns:
+        dict: Dictionary containing extracted metadata.
+    """
+    print("Extracting metadata from PDF...")
+    metadata = {
+        'round_name': '',
+        'location': '',
+        'date': '',
+        'official_panel': {
+            'PC': '',
+            'ADM': '',
+            'MUS': '',
+            'PER': '',
+            'SNG': ''
+        },
+        'awards': [],
+        'draw': [],
+        'mic_tester': '',
+        'evaluation_only': [],
+        'published': {
+            'name': '',
+            'date': ''
+        },
+        'footnotes': [],
+        'disqualifications': []
+    }
+    
+    try:
+        # Open the PDF file
+        with open(pdf_path, 'rb') as file:
+            # Create a PDF reader object
+            pdf_reader = PyPDF2.PdfReader(file)
+            
+            # Extract text from all pages
+            full_text = ""
+            for page in pdf_reader.pages:
+                full_text += page.extract_text() + "\n"
+            
+            # Look for "Official Scoring Summary"
+            summary_match = re.search(r'Official Scoring Summary\s*(.*?)(?:\n|$)', full_text)
+            if summary_match:
+                metadata['round_name'] = summary_match.group(1).strip()
+            
+            # Look for location and date
+            location_date_match = re.search(r'(.*?);\s*(.*?)(?:\n|$)', full_text)
+            if location_date_match:
+                metadata['location'] = location_date_match.group(1).strip()
+                metadata['date'] = location_date_match.group(2).strip()
+            
+            # Look for "Official Panel" - improved extraction
+            panel_section = re.search(r'Official Panel\s*(.*?)(?=Awards|Footnotes|Draw|$)', full_text, re.DOTALL)
+            if panel_section:
+                panel_text = panel_section.group(1).strip()
+                
+                # Extract panelists by category
+                pc_match = re.search(r'PC:\s*(.*?)(?=\n|$)', panel_text)
+                if pc_match:
+                    metadata['official_panel']['PC'] = pc_match.group(1).strip()
+                
+                adm_match = re.search(r'ADM:\s*(.*?)(?=\n|$)', panel_text)
+                if adm_match:
+                    metadata['official_panel']['ADM'] = adm_match.group(1).strip()
+                
+                mus_match = re.search(r'MUS:\s*(.*?)(?=\n|$)', panel_text)
+                if mus_match:
+                    metadata['official_panel']['MUS'] = mus_match.group(1).strip()
+                
+                per_match = re.search(r'PER:\s*(.*?)(?=\n|$)', panel_text)
+                if per_match:
+                    metadata['official_panel']['PER'] = per_match.group(1).strip()
+                
+                sng_match = re.search(r'SNG:\s*(.*?)(?=\n|$)', panel_text)
+                if sng_match:
+                    metadata['official_panel']['SNG'] = sng_match.group(1).strip()
+            
+            # Look for "Awards" - improved extraction
+            awards_section = re.search(r'Awards\s*(.*?)(?=Footnotes|Draw|Evaluation Only|$)', full_text, re.DOTALL)
+            if awards_section:
+                awards_text = awards_section.group(1).strip()
+                
+                # Process awards
+                award_blocks = re.split(r'\n(?=\d+\s+.*:)', awards_text)
+                for block in award_blocks:
+                    if not block.strip():
+                        continue
+                    
+                    # Extract award title and winner
+                    lines = block.strip().split('\n')
+                    award_title = lines[0].strip()
+                    winner = ''
+                    
+                    # Look for winner in subsequent lines
+                    for i in range(1, len(lines)):
+                        line = lines[i].strip()
+                        if line and not line.startswith('Published by'):
+                            winner = line
+                            break
+                    
+                    metadata['awards'].append({
+                        'award': award_title,
+                        'winner': winner
+                    })
+            
+            # Look for "Footnotes" - improved extraction
+            footnotes_section = re.search(r'Footnotes\s*(.*?)(?=Draw|Evaluation Only|$)', full_text, re.DOTALL)
+            if footnotes_section:
+                footnotes_text = footnotes_section.group(1).strip()
+                
+                # Process footnotes
+                for line in footnotes_text.split('\n'):
+                    line = line.strip()
+                    if line and not line.startswith('Published by'):
+                        metadata['footnotes'].append(line)
+            
+            # Look for "Draw" - improved extraction with mic tester handling
+            draw_section = re.search(r'Draw\s*(.*?)(?=Evaluation Only|MT:|Published by|$)', full_text, re.DOTALL)
+            if draw_section:
+                draw_text = draw_section.group(1).strip()
+                
+                # Process draw information
+                draw_entries = re.findall(r'(\d+):\s*(.*?)(?=\n\d+:|$)', draw_text, re.DOTALL)
+                for number, group in draw_entries:
+                    metadata['draw'].append({
+                        'number': number.strip(),
+                        'group': group.strip()
+                    })
+            
+            # Look for mic tester (MT)
+            mt_section = re.search(r'MT:\s*(.*?)(?=\n\n|Published by|$)', full_text, re.DOTALL)
+            if mt_section:
+                mt_text = mt_section.group(1).strip()
+                metadata['mic_tester'] = mt_text
+            
+            # Look for "The following groups performed for evaluation score only" - improved extraction
+            eval_section = re.search(r'The following groups performed for evaluation score only:\s*(.*?)(?=\n\n|Published by|Awards|Draw|Footnotes|$)', full_text, re.DOTALL)
+            if eval_section:
+                eval_text = eval_section.group(1).strip()
+                
+                # Split by commas and clean up
+                eval_groups = [g.strip() for g in eval_text.split(',') if g.strip()]
+                metadata['evaluation_only'] = eval_groups
+            
+            # Look for "Published by" - improved extraction
+            published_match = re.search(r'Published by (.*?) at (.*?)(?=\n|$)', full_text)
+            if published_match:
+                metadata['published']['name'] = published_match.group(1).strip()
+                metadata['published']['date'] = published_match.group(2).strip()
+            
+            # Look for disqualifications - improved extraction
+            disqualifications_match = re.search(r'disqualified for violation of the BHS Contest Rules:\s*(.*?)(?=\n\n|$)', full_text, re.DOTALL)
+            if disqualifications_match:
+                disqualifications_text = disqualifications_match.group(1).strip()
+                
+                # Split by commas and clean up
+                disqualifications = [d.strip() for d in disqualifications_text.split(',') if d.strip()]
+                metadata['disqualifications'] = disqualifications
+        
+        # Save metadata to YAML file
+        with open(txt_output_path, 'w', encoding='utf-8') as f:
+            f.write("Round Name: " + metadata['round_name'] + "\n")
+            f.write("Location: " + metadata['location'] + "\n")
+            f.write("Date: " + metadata['date'] + "\n\n")
+            
+            f.write("Panel:\n")
+            f.write("  PC: " + metadata['official_panel']['PC'] + "\n")
+            f.write("  ADM: " + metadata['official_panel']['ADM'] + "\n")
+            f.write("  MUS: " + metadata['official_panel']['MUS'] + "\n")
+            f.write("  PER: " + metadata['official_panel']['PER'] + "\n")
+            f.write("  SNG: " + metadata['official_panel']['SNG'] + "\n\n")
+            
+            f.write("Awards:\n")
+            for award in metadata['awards']:
+                f.write("  - Award: " + award['award'] + "\n")
+                f.write("    Winner: " + award['winner'] + "\n")
+            f.write("\n")
+            
+            f.write("Draw:\n")
+            for draw in metadata['draw']:
+                f.write("  - Number: " + draw['number'] + "\n")
+                f.write("    Group: " + draw['group'] + "\n")
+            if metadata['mic_tester']:
+                f.write("  - Mic Tester: " + metadata['mic_tester'] + "\n")
+            f.write("\n")
+            
+            f.write("Evaluation Only:\n")
+            for group in metadata['evaluation_only']:
+                f.write("  - " + group + "\n")
+            f.write("\n")
+            
+            f.write("Published:\n")
+            f.write("  Name: " + metadata['published']['name'] + "\n")
+            f.write("  Date: " + metadata['published']['date'] + "\n\n")
+            
+            f.write("Footnotes:\n")
+            for footnote in metadata['footnotes']:
+                f.write("  - " + footnote + "\n")
+            f.write("\n")
+            
+            f.write("Disqualifications:\n")
+            for disqualification in metadata['disqualifications']:
+                f.write("  - " + disqualification + "\n")
+                    
+        print(f"Metadata saved to {txt_output_path}")
+        return metadata
+    except Exception as e:
+        print(f"Error extracting metadata from PDF: {e}")
+        return metadata
+
+def convert_scoresheet(pdf_path: str, formats: list[str], metadataOnly: bool = False) -> dict[str, str]:
     base_path = pdf_path.rsplit('.', 1)[0]
     paths = {}
+
+    # Extract metadata to a separate text file
+    txt_path = f"{base_path}_metadata.txt"
+    metadata = extract_metadata(pdf_path, txt_path)
+    paths["metadata"] = txt_path
+
+    if metadataOnly:
+        return paths
 
     if "csv" in formats:
         csv_path = f"{base_path}.csv"
@@ -233,9 +458,11 @@ def create_pivot_format(json_path, pivot_csv_path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Parse a barbershop scoresheet PDF into various formats.")
     parser.add_argument("--input", "-i", required=True, help="Path to the input PDF file.")
-    parser.add_argument("--formats", "-f", nargs="+", choices=["csv", "json", "pivot"], default=["csv", "json", "pivot"],
+    parser.add_argument("--formats", "-f", nargs="+", choices=["csv", "json", "pivot", "metadata"], default=["csv", "json", "pivot", "metadata"],
                         help="Output formats to generate (default: all)")
 
     args = parser.parse_args()
-    convert_scoresheet(args.input, args.formats)
+    
+
+    convert_scoresheet(args.input, args.formats, args.metadata_only)
 
