@@ -1,0 +1,6 @@
+Group	Representing	District	Total Score	On Stage	Total Points
+The Men of Independence	Independence, OH	None	82.7	31	992
+The Alliance	Greater Central Ohio	None	78.1	19	937
+Circle City Sound	Greater Indianapolis, IN	CAR	74.7	28	896
+Voices of Harmony	Northwest Ohio	None	72.8	20	874
+Dayton Metro Barbershop Chorus	Dayton Metro, OH	None	63.5		762

@@ -262,153 +262,6 @@ def extract_metadata(pdf_path, txt_output_path):
         print(f"Error extracting metadata from PDF: {e}")
         return metadata
 
-def convert_scoresheet(pdf_path: str, formats: list[str], metadataOnly: bool = False) -> dict[str, str]:
-    base_path = pdf_path.rsplit('.', 1)[0]
-    paths = {}
-
-    # Extract metadata to a separate text file
-    txt_path = f"{base_path}_metadata.txt"
-    metadata = extract_metadata(pdf_path, txt_path)
-    paths["metadata"] = txt_path
-
-    if metadataOnly:
-        return paths
-
-    if "csv" in formats:
-        csv_path = f"{base_path}.csv"
-        extract_tables(pdf_path, csv_path)
-        paths["csv"] = csv_path
-
-    if "json" in formats:
-        json_path = f"{base_path}.json"
-        if "csv" not in paths:
-            csv_path = f"{base_path}.csv"
-            extract_tables(pdf_path, csv_path)
-        parse_table(csv_path, json_path)
-        paths["json"] = json_path
-
-    if "pivot" in formats:
-        pivot_path = f"{base_path}_pivot.csv"
-        if "json" not in paths:
-            json_path = f"{base_path}.json"
-            if "csv" not in paths:
-                csv_path = f"{base_path}.csv"
-                extract_tables(pdf_path, csv_path)
-            parse_table(csv_path, json_path)
-        create_pivot_format(json_path, pivot_path)
-        paths["pivot"] = pivot_path
-
-    return paths
-
-def extract_scores(row):
-    # Try different possible column names
-    score_columns = {
-        'MUS': ['MUS', 'Music', 'Music Score'],
-        'PER': ['PER', 'Performance', 'Performance Score'],
-        'SNG': ['SNG', 'Singing', 'Singing Score'],
-        'Total': ['Total', 'Total Score', 'Final Score']
-    }
-    
-    scores = {}
-    for score_type, possible_names in score_columns.items():
-        for col_name in possible_names:
-            if col_name in row:
-                try:
-                    scores[score_type] = float(row[col_name])
-                    break
-                except (ValueError, TypeError):
-                    continue
-        if score_type not in scores:
-            print(f"Warning: Could not find {score_type} score in columns: {row.keys()}")
-            scores[score_type] = 0.0
-    
-    return scores
-
-def parse_table(csv_path, json_path):
-    data = []
-    current_group = None
-    current_round = 'Finals'  # Default to Finals
-    
-    # Read the CSV file with pandas to handle the BOM
-    df = pd.read_csv(csv_path, encoding='utf-8-sig')
-    # Clean column names
-    df.columns = [clean_column_name(col) for col in df.columns]
-    
-    # Convert DataFrame to list of dictionaries
-    rows = df.to_dict('records')
-    
-    for row in rows:
-        # Try to find the group column
-        group_col = None
-        for possible_name in ['Group', 'Group Name', 'Name', 'Contestant']:
-            if possible_name in row:
-                group_col = possible_name
-                break
-        
-        if not group_col:
-            print("Warning: Could not find group column. Available columns:", row.keys())
-            continue
-            
-        # Check if this row starts a new group
-        if row[group_col] and re.match(r'\d+\.', str(row[group_col])):
-            if current_group:
-                data.append(current_group)
-            
-            # Extract placement and group name
-            group_parts = str(row[group_col]).split('. ', 1)
-            placement = int(group_parts[0])
-            group_name = group_parts[1].split(' (')[0]  # Remove district info if present
-            
-            scores = extract_scores(row)
-            
-            current_group = {
-                'placement': placement,
-                'group': group_name,
-                'combined_total_scores': scores,
-                'rounds': {
-                    'Finals': {
-                        'scores': scores,
-                        'songs': []
-                    }
-                }
-            }
-        
-        # Process songs/rounds information
-        song_col = None
-        for possible_name in ['Songs', 'Song', 'Title', 'Selection']:
-            if possible_name in row:
-                song_col = possible_name
-                break
-        
-        if song_col and row[song_col]:
-            if str(row[song_col]).startswith('Total: '):
-                continue  # Skip total points rows
-            
-            # Handle round markers
-            for round_name in ['Finals', 'Semi-Finals', 'Quarter-Finals']:
-                if str(row[song_col]).startswith(f'{round_name}: '):
-                    current_round = round_name
-                    if round_name not in current_group['rounds']:
-                        current_group['rounds'][round_name] = {'songs': [], 'scores': {}}
-                    current_group['rounds'][round_name]['scores'] = extract_scores(row)
-                    break
-            else:  # This is a song (no round marker matched)
-                song_info = {
-                    'title': row[song_col],
-                    'scores': extract_scores(row)
-                }
-                current_group['rounds'][current_round]['songs'].append(song_info)
-
-    # Add the last group
-    if current_group:
-        data.append(current_group)
-
-    # Write to JSON file
-    with open(json_path, 'w') as f:
-        json.dump(data, f, indent=4)
-    
-    print(f"JSON file saved to {json_path}")
-
 def create_pivot_format(json_path, pivot_csv_path):
      """
      Transform the JSON data into a format suitable for pivot tables.
@@ -453,16 +306,262 @@ def create_pivot_format(json_path, pivot_csv_path):
      df = pd.DataFrame(rows)
      df.to_csv(pivot_csv_path, index=False, encoding='utf-8')
      print(f"Pivot table format saved to {pivot_csv_path}")
- 
- 
+
+def create_tremper_table(json_path, tremper_output_path):
+    """
+    Create a Tremper Table format - specifically requested by Steve Tremper as part of his management
+    of the harmonet score archive ranked summaries. Outputs group name and total score separated by tabs.
+    
+    Args:
+        json_path (str): Path to the input JSON file
+        tremper_output_path (str): Path to save the Tremper Table formatted file
+    """
+    with open(json_path, 'r') as f:
+        data = json.load(f)
+    
+    # Create list to hold all rows
+    rows = []
+    
+    for group_data in data:
+        group_name = group_data['group_details']['group']
+        group_representing = group_data['group_details'].get('representing', '')  # Default to empty string if not found
+        group_district = group_data['group_details'].get('district', '')  # Default to empty string if not found
+        total_score = group_data['combined_total_scores']['Total']
+        on_stage = group_data['group_details'].get('on_stage', '')  # Default to empty string if not found
+        total_points = group_data['combined_total_scores']['Points']
+        rows.append({
+            'group': group_name,
+            'representing': group_representing,
+            'district': group_district,
+            'total_score': total_score,
+            'on_stage': on_stage,
+            'total_points': total_points
+        })
+    
+    # Sort by total score in descending order
+    rows.sort(key=lambda x: x['total_score'], reverse=True)
+    
+    # Write to tab-separated file
+    with open(tremper_output_path, 'w', encoding='utf-8') as f:
+        f.write("Group\tRepresenting\tDistrict\tTotal Score\tOn Stage\tTotal Points\n")
+        for row in rows:
+            f.write(f"{row['group']}\t{row['representing']}\t{row['district']}\t{row['total_score']}\t{row['on_stage']}\t{row['total_points']}\n")
+    
+    print(f"Tremper Table format saved to {tremper_output_path}")
+
+def convert_scoresheet(pdf_path: str, formats: list[str], metadataOnly: bool = False) -> dict[str, str]:
+    base_path = pdf_path.rsplit('.', 1)[0]
+    paths = {}
+
+    # Extract metadata to a separate text file
+    txt_path = f"{base_path}_metadata.txt"
+    metadata = extract_metadata(pdf_path, txt_path)
+    paths["metadata"] = txt_path
+
+    if metadataOnly:
+        return paths
+
+    if "csv" in formats:
+        csv_path = f"{base_path}.csv"
+        extract_tables(pdf_path, csv_path)
+        paths["csv"] = csv_path
+
+    if "json" in formats:
+        json_path = f"{base_path}.json"
+        if "csv" not in paths:
+            csv_path = f"{base_path}.csv"
+            extract_tables(pdf_path, csv_path)
+        parse_table(csv_path, json_path)
+        paths["json"] = json_path
+
+    if "pivot" in formats:
+        pivot_path = f"{base_path}_pivot.csv"
+        if "json" not in paths:
+            json_path = f"{base_path}.json"
+            if "csv" not in paths:
+                csv_path = f"{base_path}.csv"
+                extract_tables(pdf_path, csv_path)
+            parse_table(csv_path, json_path)
+        create_pivot_format(json_path, pivot_path)
+        paths["pivot"] = pivot_path
+
+    if "tremper" in formats:
+        tremper_path = f"{base_path}_tremper.txt"
+        if "json" not in paths:
+            json_path = f"{base_path}.json"
+            if "csv" not in paths:
+                csv_path = f"{base_path}.csv"
+                extract_tables(pdf_path, csv_path)
+            parse_table(csv_path, json_path)
+        create_tremper_table(json_path, tremper_path)
+        paths["tremper"] = tremper_path
+
+    return paths
+
+def extract_scores(row):
+    """
+    Extract scores from a row using the standard column names.
+    Returns a dictionary with MUS, PER, SNG, and Total scores.
+    """
+    scores = {}
+    for score_type in ['MUS', 'PER', 'SNG', 'Total']:
+        if score_type in row:
+            try:
+                scores[score_type] = float(row[score_type])
+            except (ValueError, TypeError):
+                print(f"Warning: Could not convert {score_type} score to float: {row[score_type]}")
+                scores[score_type] = 0.0
+        else:
+            print(f"Warning: Could not find {score_type} score in columns: {row.keys()}")
+            scores[score_type] = 0.0
+    
+    return scores
+
+def parse_table(csv_path, json_path):
+    data = []
+    current_group = None
+    current_round = 'Finals'  # Default to Finals
+    group_details = []  # Store all details for current group
+    
+    # Read the CSV file with pandas to handle the BOM
+    df = pd.read_csv(csv_path, encoding='utf-8-sig')
+    # Clean column names
+    df.columns = [clean_column_name(col) for col in df.columns]
+    
+    # Convert DataFrame to list of dictionaries
+    rows = df.to_dict('records')
+    
+    for row in rows:
+        # Try to find the group column
+        group_col = 'Group'
+        
+        if not group_col:
+            print("Warning: Could not find group column. Available columns:", row.keys())
+            continue
+            
+        # Check if this row starts a new group
+        if row[group_col] and re.match(r'\d+\.', str(row[group_col])):
+            # If we have a current group, process its details before starting a new one
+            if current_group:
+                process_group_details(group_details, current_group)
+                data.append(current_group)
+                group_details = []  # Reset details for new group
+            
+            # Extract placement and group name
+            group_parts = str(row[group_col]).split('. ', 1)
+            placement = int(group_parts[0])
+            group_name = group_parts[1].split(' (')[0]  # Remove district info if present
+            group_district = group_parts[1].split(' (')[1].split(')')[0] if ' (' in group_parts[1] else None
+            
+            scores = extract_scores(row)
+            
+            current_group = {
+                'group_details': {
+                    'placement': placement,
+                    'group': group_name,
+                    'district': group_district
+                },
+                'combined_total_scores': scores,
+                'rounds': {
+                    'Finals': {
+                        'scores': scores,
+                        'songs': []
+                    }
+                }
+            }
+        else:
+            # If we have a current group, collect this row's Group data
+            if current_group and row[group_col]:
+                details = str(row[group_col])
+                group_details.append(details)
+        
+        # Process songs/rounds information
+        song_col = 'Songs'
+        
+        if song_col and row[song_col]:
+            if str(row[song_col]).startswith('Total: '):
+                # Extract points from Total: 2000
+                points_match = re.search(r'Total: (\d+)', row[song_col])
+                if points_match:
+                    current_group['combined_total_scores']['Points'] = int(points_match.group(1))
+                continue  # Skip total points rows
+            
+            # Handle round markers
+            for round_name in ['Finals', 'Semi-Finals', 'Quarter-Finals']:
+                if str(row[song_col]).startswith(f'{round_name}: '):
+                    current_round = round_name
+                    if round_name not in current_group['rounds']:
+                        current_group['rounds'][round_name] = {'songs': [], 'scores': {}}
+                    current_group['rounds'][round_name]['scores'] = extract_scores(row)
+                    break
+            else:  # This is a song (no round marker matched)
+                # Only add the song if there's a valid title (i.e. not NaN)
+                if row[song_col] and str(row[song_col]).strip() and not pd.isna(row[song_col]):
+                    song_info = {
+                        'title': row[song_col],
+                        'scores': extract_scores(row)
+                    }
+                    current_group['rounds'][current_round]['songs'].append(song_info)
+
+    # Process details for the last group
+    if current_group:
+        process_group_details(group_details, current_group)
+        data.append(current_group)
+
+    # Write to JSON file
+    with open(json_path, 'w') as f:
+        json.dump(data, f, indent=4)
+    
+    print(f"JSON file saved to {json_path}")
+
+def process_group_details(details_list, group_dict):
+    """Process all collected details for a group"""
+    if not details_list:
+        return
+            
+    # Combine all details into a single string
+    full_details = ' '.join(details_list)
+    
+    # Check if this is a chorus (has Dir(s):) or quartet
+    if 'Dir(s):' in full_details:
+        # Chorus case - only extract chorus fields
+        # Extract representing (everything before first parenthesis)
+        if '(' in full_details:
+            group_dict['group_details']['representing'] = full_details.split('(')[0].strip()
+        
+        # Extract directors
+        dirs_text = full_details.split('Dir(s):')[1].split(';')[0].strip()
+        group_dict['group_details']['directors'] = dirs_text
+        
+        # Extract on_stage count
+        if 'OnStage:' in full_details:
+            try:
+                on_stage_text = full_details.split('OnStage:')[1].strip()
+                group_dict['group_details']['on_stage'] = int(on_stage_text)
+            except (ValueError, IndexError):
+                pass
+    else:
+        # Quartet case - only extract quartet fields
+        # Extract district (everything before first open parenthesis)
+        if '(' in full_details:
+            group_dict['group_details']['district'] = full_details.split('(')[0].strip()
+        
+        # Extract members (everything after close parenthesis)
+        if ')' in full_details:
+            members_text = full_details.split(')')[1].strip()
+            # Remove " nan " patterns and end-of-string "nan"
+            members_text = members_text.replace(' nan ', ' ').rstrip(' nan')
+            if members_text:  # Only add if there's actual content
+                group_dict['group_details']['members'] = members_text
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Parse a barbershop scoresheet PDF into various formats.")
     parser.add_argument("--input", "-i", required=True, help="Path to the input PDF file.")
-    parser.add_argument("--formats", "-f", nargs="+", choices=["csv", "json", "pivot", "metadata"], default=["csv", "json", "pivot", "metadata"],
+    parser.add_argument("--formats", "-f", nargs="+", choices=["csv", "json", "pivot", "metadata", "tremper"], default=["csv", "json", "pivot", "metadata", "tremper"],
                         help="Output formats to generate (default: all)")
 
     args = parser.parse_args()
     
 
-    convert_scoresheet(args.input, args.formats, args.metadata_only)
+    convert_scoresheet(args.input, args.formats)
 
