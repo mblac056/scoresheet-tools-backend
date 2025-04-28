@@ -4,9 +4,7 @@ import pandas as pd
 import json
 import re
 import argparse
-import csv
-import os
-import PyPDF2  # For extracting text from PDF
+import PyPDF2  
 
 def clean_column_name(col_name):
     """Remove BOM and clean up column names."""
@@ -326,16 +324,16 @@ def create_tremper_table(json_path, tremper_output_path):
         group_name = group_data['group_details']['group']
         group_representing = group_data['group_details'].get('representing', '')  # Default to empty string if not found
         group_district = group_data['group_details'].get('district', '')  # Default to empty string if not found
-        total_score = group_data['combined_total_scores']['Total']
+        percent_avg = group_data['combined_total_scores']['Total']
         on_stage = group_data['group_details'].get('on_stage', '')  # Default to empty string if not found
         total_points = group_data['combined_total_scores']['Points']
         rows.append({
             'group': group_name,
             'representing': group_representing,
             'district': group_district,
-            'total_score': total_score,
+            'total_score': total_points,
             'on_stage': on_stage,
-            'total_points': total_points
+            'percent_avg': percent_avg
         })
     
     # Sort by total score in descending order
@@ -343,9 +341,9 @@ def create_tremper_table(json_path, tremper_output_path):
     
     # Write to tab-separated file
     with open(tremper_output_path, 'w', encoding='utf-8') as f:
-        f.write("Group\tRepresenting\tDistrict\tTotal Score\tOn Stage\tTotal Points\n")
+        f.write("Group\tRepresenting\tDistrict\tTotal Score\tOn Stage\tPercent Avg\n")
         for row in rows:
-            f.write(f"{row['group']}\t{row['representing']}\t{row['district']}\t{row['total_score']}\t{row['on_stage']}\t{row['total_points']}\n")
+            f.write(f"{row['group']}\t{row['representing']}\t{row['district']}\t{row['total_score']}\t{row['on_stage']}\t{row['percent_avg']}\n")
     
     print(f"Tremper Table format saved to {tremper_output_path}")
 
